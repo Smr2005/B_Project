@@ -1,4 +1,8 @@
-from .query_optimizer import optimize_query
-from .schema_advisor import analyze_schema
-from .cost_advisor import cost_saving_tips
-from .data_validator import validate_data
+# agents/__init__.py
+
+from .query_optimizer import QueryOptimizer
+from .schema_advisor import SchemaAdvisor
+from .cost_saver import CostSaver
+from .data_validator import DataValidator
+
+__all__ = ["QueryOptimizer", "SchemaAdvisor", "CostSaver", "DataValidator"]

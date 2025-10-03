@@ -4,4 +4,6 @@ python-dotenv==1.0.1
 httpx==0.24.1
 pymysql==1.1.0
 mysql-connector-python
+anthropic>=0.69.0
 jinja2
+pytest==8.3.2

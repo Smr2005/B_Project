@@ -5,6 +5,10 @@ import os
 # Load environment variables from .env
 load_dotenv()
 
+# API keys
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+
 # Database settings from environment variables
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", 3306))

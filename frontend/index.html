@@ -2,19 +2,66 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MariaDB Query Optimizer</title>
     <link rel="stylesheet" href="/static/style.css">
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Prism.js for syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css">
 </head>
 <body>
-    <h1>MariaDB Query Optimizer</h1>
+    <div class="header">
+        <div class="header-content">
+            <div class="logo">
+                <i class="fas fa-database"></i>
+                <h1>MariaDB Query Optimizer</h1>
+            </div>
+            <p class="subtitle">AI-Powered SQL Analysis & Optimization</p>
+        </div>
+    </div>
 
-    <form id="queryForm">
-        <textarea name="query" id="query" rows="5" cols="60" placeholder="Enter your SQL query here"></textarea><br><br>
-        <button type="submit">Analyze</button>
-    </form>
+    <div class="container">
+        <div class="input-section">
+            <div class="section-header">
+                <i class="fas fa-code"></i>
+                <h2>SQL Query Input</h2>
+            </div>
+            <form id="queryForm">
+                <div class="textarea-wrapper">
+                    <textarea name="query" id="query" rows="8" placeholder="-- Enter your SQL query here&#10;SELECT * FROM orders WHERE ..." required></textarea>
+                    <div class="textarea-footer">
+                        <span class="hint"><i class="fas fa-info-circle"></i> Paste your MariaDB query for comprehensive analysis</span>
+                    </div>
+                </div>
+                <button type="submit" class="analyze-btn">
+                    <i class="fas fa-magic"></i>
+                    <span>Analyze Query</span>
+                </button>
+            </form>
+        </div>
 
-    <div id="result"></div>
+        <div id="result" class="results"></div>
+    </div>
 
+    <footer class="footer">
+        <div class="footer-content">
+            <p>⚡ Powered by Claude AI • Built with ❤️ for MariaDB Optimization</p>
+            <div class="footer-stats">
+                <span><i class="fas fa-bolt"></i> Lightning Fast</span>
+                <span><i class="fas fa-shield-alt"></i> Secure</span>
+                <span><i class="fas fa-brain"></i> AI-Powered</span>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Prism.js for syntax highlighting -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
     <script src="/static/script.js"></script>
 </body>
 </html>
