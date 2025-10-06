@@ -1,245 +1,448 @@
 # AWS Redshift & Bedrock Migration Playbook
 
 ## 1. Introduction
-This playbook provides a comprehensive, step-by-step guide for migrating the existing **MariaDB Query Optimizer FastAPI application** to an AWS-native ecosystem that analyzes **Amazon Redshift** workloads and uses **Claude models on Amazon Bedrock** for intelligent recommendations. The document assumes no prior AWS experience and covers every task required for the next working day, from account setup to operational readiness.
+This playbook provides a comprehensive, step-by-step guide for migrating the existing **MariaDB Query Optimizer FastAPI application** to a fully managed **AWS-native ecosystem** built on **Amazon Redshift** telemetry and **Claude models on Amazon Bedrock**. It explains exactly how to reproduce every capability of the current project—query submission, multi-agent optimization workflows, schema review, cost governance, data validation, history tracking, and alerting—using AWS services. The design orchestrates four specialized Bedrock agents, persists Redshift schema and data metadata in Amazon S3, and keeps that metadata automatically refreshed as underlying structures evolve day to day. Follow the sequence in this document to reproduce the solution from scratch without prior AWS experience.
 
 ## 2. Prerequisites
 1. **AWS Account & Permissions**
-   - Root or administrative access (temporary) to enable Bedrock and create IAM roles.
-   - MFA enabled on the account for security.
+   - Root or administrator-level access (temporary) to enable Amazon Bedrock (per region) and provision IAM roles and policies.
+   - MFA enforced on the AWS account.
 2. **Local Workstation Setup**
-   - Python 3.11+ installed.
-   - AWS CLI (`aws --version`) configured.
-   - Git installed for version control.
-3. **Existing Codebase**
-   - Current FastAPI project (`B_Project`).
-   - Access to new artifacts created by this migration plan.
+   - Python 3.11+.
+   - AWS CLI v2 configured (`aws configure`).
+   - Git and Git LFS (if architecture diagrams or prompts are large binaries).
+   - Terraform, AWS SAM, or CloudFormation tooling (choose one for infrastructure-as-code).
+3. **Existing Codebase Access**
+   - Current FastAPI project (`B_Project`) with knowledge of endpoints, models, storage, and UI.
+   - Documentation describing the MariaDB-based optimizer flow.
 4. **Planning Artifacts**
-   - Client requirements PDF (attached).
-   - This playbook.
+   - Client requirement PDF.
+   - This playbook printed or bookmarked.
+   - User credential vault (password manager) to store generated secrets.
 
-## 3. High-Level Timeline
+## 3. Source Project Parity Checklist
+| On-Prem / Existing Feature | AWS Equivalent | Implementation Notes |
+| --- | --- | --- |
+| Web UI query submission & optimization request | FastAPI service hosted on EC2/ECS/Lambda + API Gateway | Reuse FastAPI routes; add new `/optimize/redshift` and `/ingest/bedrock` endpoints. |
+| MariaDB query optimizer logic | Bedrock agent `redshift-query-optimizer` | Invoke via orchestrator Lambda; persist output to DynamoDB and S3. |
+| Schema analysis routines | Bedrock agent `schema-normalizer` + S3 metadata store | Provide up-to-date schema metadata pulled from Redshift daily. |
+| Cost monitoring scripts | Bedrock agent `cost-saver` with Redshift system tables | Feed agent historical query metrics and table size stats extracted into S3. |
+| Data validation jobs | Bedrock agent `data-validation-agent` | Compare Redshift tables with source metadata stored in S3 (manifests from ETL). |
+| Historical recommendation storage | DynamoDB (`query-optimization-history`) and S3 (`recommendations/`) | DynamoDB for fast lookup, S3 for long-term archive & Bedrock context. |
+| Email / Slack alerts | Amazon SNS + Slack webhook | Lambda orchestrator publishes notifications. |
+| Manual schema documentation | Automated metadata JSON files in S3 (`metadata/schema.json`, `metadata/data_profile.json`) | Regenerated daily via metadata refresh Lambda. |
+
+## 4. High-Level Timeline
 | Day | Track | Key Outcomes |
-| --- | ----- | ------------ |
-| Day 0 | Preparation | AWS account ready, permissions confirmed, local tooling installed |
-| Day 1 | Infrastructure | VPC, Redshift cluster, S3 buckets, IAM roles provisioned |
-| Day 1 | Bedrock Enablement | Claude Sonnet/Opus model access approved |
-| Day 1 | Lambda Services | Query collector and orchestrator functions deployed |
-| Day 1 | FastAPI Integration | New webhook endpoint and environment variables configured |
-| Day 1 | Testing & Validation | End-to-end dry run with sample Redshift query |
+| --- | --- | --- |
+| Day 0 | Preparation | AWS account ready, Bedrock access requested, local tooling installed, feature-parity checklist reviewed |
+| Day 1 (Morning) | Core AWS Foundation | VPC, Redshift, S3 buckets, IAM roles, Secrets Manager entries provisioned |
+| Day 1 (Midday) | Metadata Lake | S3 metadata bucket structured, Glue crawler/Lambda metadata extractor deployed, metadata JSON exported |
+| Day 1 (Afternoon) | Telemetry & Agents | Lambdas (query collector, metadata extractor, orchestrator) deployed; Bedrock agents configured |
+| Day 1 (Late) | FastAPI Integration | New endpoints, environment variables, and agent results UI implemented; notifications wired |
+| Day 1 (Evening) | Testing & Automation | End-to-end workflow validated; EventBridge schedules confirmed; documentation updated |
 
-## 4. Environment Diagram
+## 5. Environment Diagram
 ```mermaid
 flowchart LR
-    subgraph Client[Local Developer Environment]
-        VSCode[VS Code IDE]
-        CLI[AWS CLI]
+    subgraph Client["Local Developer Environment"]
+        VSCode["VS Code IDE"]
+        CLI["AWS CLI & IaC Tooling"]
     end
 
-    subgraph AWS[AWS Cloud]
-        subgraph Network[VPC]
-            RS[Amazon Redshift Cluster]
-            Lambdas[Lambda Subnet]
+    subgraph AWS["AWS Cloud"]
+        subgraph Network["VPC"]
+            RS["Amazon Redshift Cluster"]
+            Lambdas["Private Subnets for Lambda"]
         end
-        S3[(Amazon S3 Buckets)]
-        DynamoDB[(Amazon DynamoDB Table)]
-        EventBridge[Amazon EventBridge Scheduler]
-        Bedrock["Amazon Bedrock Claude 3"]
-        SNS["Amazon SNS or Slack Webhook"]
+        S3Metadata["Amazon S3 (Telemetry + Metadata + Recommendations)"]
+        DynamoDB["Amazon DynamoDB (History Store)"]
+        EventBridge["Amazon EventBridge Scheduler"]
+        MetadataExtractor["Metadata Extractor Lambda"]
+        QueryCollector["Query Collector Lambda"]
+        AgentOrchestrator["Agent Orchestrator Lambda"]
+        Bedrock["Amazon Bedrock (Claude 3 Agents)"]
+        SNS["Amazon SNS / Slack Webhook"]
         FastAPI["FastAPI Service (EC2 / ECS / Lambda)"]
     end
 
-    VSCode -->|Code Deploy| AWS
-    CLI -->|Infrastructure as Code| AWS
-    RS -->|Slow Query/Telemetry| S3
-    S3 -->|Triggers| EventBridge
-    EventBridge --> Lambdas
-    Lambdas --> Bedrock
-    Bedrock --> Lambdas
-    Lambdas --> DynamoDB
-    Lambdas --> FastAPI
-    Lambdas --> SNS
-    FastAPI -->|UI / API| Clients
+    VSCode -->|"Code Deploy"| AWS
+    CLI -->|"Infrastructure as Code"| AWS
+    RS -->|"System tables, STL logs"| MetadataExtractor
+    MetadataExtractor -->|"Schema & data metadata"| S3Metadata
+    EventBridge --> MetadataExtractor
+    EventBridge --> QueryCollector
+    QueryCollector -->|"Slow query batches"| S3Metadata
+    S3Metadata --> AgentOrchestrator
+    AgentOrchestrator --> Bedrock
+    Bedrock --> AgentOrchestrator
+    AgentOrchestrator --> DynamoDB
+    AgentOrchestrator --> FastAPI
+    AgentOrchestrator --> SNS
+    AgentOrchestrator -->|"Recommendation archive"| S3Metadata
+    FastAPI -->|"UI / API"| Clients["Application Users"]
 ```
 
-## 5. Detailed Implementation Plan
-### 5.1 Day 0 – Preparation
+## 6. Detailed Implementation Plan
+### 6.1 Day 0 – Preparation
 1. **Confirm AWS Access**
-   - Log in to the AWS console using MFA.
-   - Create an IAM user for yourself with AdministratorAccess (temporary) if needed.
-2. **Install AWS CLI**
-   - Download from https://aws.amazon.com/cli/ and install.
-   - Run `aws configure` to supply Access Key, Secret Key, region (e.g., `us-east-1`), and default output `json`.
-3. **Review Existing FastAPI Project**
-   - Note the new integration points: ingest endpoint, history store extension.
-   - Set up a new Git branch (e.g., `feature/aws-redshift-bedrock`).
+   - Log in with MFA.
+   - Enable Bedrock in `us-east-1` (or chosen region) under *Amazon Bedrock → Model access*.
+2. **Review Existing FastAPI Application**
+   - Identify routes handling query submissions, history, and notifications.
+   - Catalogue existing schemas, sample queries, and stored metadata files to reproduce in S3.
+   - Document configuration values (database URLs, secrets) that must migrate to AWS Secrets Manager.
+3. **Create Project Branch & Repo Structure**
+   - `git checkout -b feature/aws-redshift-bedrock`.
+   - In repo, add directories: `infra/` (templates), `lambdas/`, `fastapi/` (new or updated code), `docs/`.
+4. **Plan Infrastructure as Code**
+   - Choose Terraform or SAM. Outline modules/stacks for VPC, Redshift, Lambdas, DynamoDB, S3, EventBridge.
+5. **Bedrock Model Access Request**
+   - Request `anthropic.claude-3-sonnet-20240229-v1:0` (minimum) and optionally `anthropic.claude-3-opus-20240229-v1:0`.
+6. **Define Secrets Inventory**
+   - Redshift admin credentials, FastAPI webhook token, Slack webhook URL, optional API keys.
+7. **Draft Metadata Schema**
+   - Decide JSON structures for `schema.json`, `data_profile.json`, `query_samples.json` to store in S3.
+8. **Align Team**
+   - Share this playbook with stakeholders; schedule Day 1 checkpoints.
 
-### 5.2 Day 1 Morning – AWS Infrastructure Setup
-1. **Create VPC and Networking (optional if existing)**
-   - Use AWS Console VPC wizard or CloudFormation template to create:
-     - VPC (CIDR: 10.0.0.0/16)
-     - Private subnets for Redshift and Lambda
-     - Public subnet (if using NAT/Internet) for testing
-     - NAT Gateway for outbound internet if Lambdas need to reach Bedrock without VPC endpoints
-2. **Provision Amazon Redshift Cluster**
-   - Navigate to Redshift service → Create cluster.
-   - Choose RA3 or DC2 nodes based on budget.
-   - Set database name (e.g., `analytics`), admin user, and password (store in Secrets Manager).
-   - Configure security group to allow Lambda subnet access (SG rules for port 5439).
-3. **Configure Redshift Workload Management**
-   - Set up separate queues for analytical loads vs. standard queries.
-   - Enable automatic `wlm_json_status` logging.
-4. **Create S3 Buckets**
-   - `my-redshift-logs-bucket` for telemetry exports
-   - `my-bedrock-outputs-bucket` for Claude responses (optional)
-   - Enable default encryption (SSE-S3) and access logs.
-5. **IAM Roles**
-   - **Lambda Execution Role**: Permissions for Redshift Data API, Bedrock, DynamoDB, S3, CloudWatch Logs.
-   - **Redshift IAM Role**: Permissions for S3 read/write if exporting logs.
+### 6.2 Day 1 Morning – Core AWS Foundation
+1. **Provision VPC & Networking**
+   - CIDR: `10.0.0.0/16`.
+   - Private subnets (AZ-a, AZ-b) for Redshift and Lambdas.
+   - Public subnet (optional) for bastion/NAT.
+   - NAT Gateway + route tables enabling outbound access for private subnets.
+   - Security Groups:
+     - `sg-redshift` allowing inbound 5439 from Lambda subnets.
+     - `sg-lambda` allowing outbound 443 (Bedrock, S3, DynamoDB) and 5439 (Redshift Data API endpoint).
+2. **Provision Amazon Redshift**
+   - Node type RA3 or DC2 per cost/performance.
+   - Database `analytics`, admin user stored in Secrets Manager (`/prod/redshift/admin`).
+   - Enable logging to S3 (use dedicated bucket folder `logs/redshift/`).
+   - Configure Workload Management queues for interactive vs. background workloads.
+3. **Create S3 Buckets**
+   - `redshift-telemetry-bucket` (versioning enabled) with folders:
+     - `metadata/schema/`
+     - `metadata/data_profile/`
+     - `metadata/query_history/`
+     - `recommendations/`
+     - `bedrock-context/`
+   - Enable default SSE-S3 encryption and access logging.
+4. **Create DynamoDB Table**
+   - Table: `query-optimization-history`.
+   - Partition key `query_hash` (string), sort key `analysis_timestamp` (ISO8601 string).
+   - Enable point-in-time recovery.
+5. **IAM Roles & Policies**
+   - **`LambdaExecutionRole`** with policies for:
+     - `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`.
+     - `redshift-data:*` (scoped to cluster resource).
+     - `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:UpdateItem` on history table.
+     - `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on telemetry bucket.
+     - `secretsmanager:GetSecretValue` for relevant secrets.
+     - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`.
+   - **`RedshiftLoggingRole`** for S3 export.
+   - **`FastAPIServerRole`** (if running on ECS/EC2/Lambda) with permission to read S3 metadata and DynamoDB entries.
+6. **Secrets Manager Entries**
+   - `/prod/redshift/admin` with username/password.
+   - `/prod/fastapi/webhook-token` for orchestrator authentication.
+   - `/prod/notifications/slack` for SNS HTTP subscription if needed.
+7. **EventBridge Baseline Rules (Skeleton)**
+   - Hourly `QueryCollectorSchedule` (disabled until Lambda deployed).
+   - Daily `MetadataRefreshSchedule` at 02:00 UTC.
 
-### 5.3 Day 1 Morning – Bedrock Enablement
-1. Navigate to **Amazon Bedrock → Model Access**.
-2. Request activation for **Claude 3 Sonnet** and optionally **Claude 3 Opus** in `us-east-1`.
-3. Wait for approval (usually minutes to hours).
-4. Note the model IDs for use in Lambda: `anthropic.claude-3-sonnet-20240229-v1:0`.
-
-### 5.4 Day 1 Afternoon – Lambda Functions & Event Bridge
-1. **Query Collector Lambda** (Optional if using exports)
-   - Runtime: Python 3.11.
-   - Responsibilities: call Redshift Data API, run SQL to fetch slow queries, write results to S3 or directly to orchestrator queue.
-   - Sample SQL to retrieve slow queries:
-     ```sql
-     SELECT query, database, userid, start_time, total_exec_time, rows, label
-     FROM stl_query
-     WHERE start_time >= dateadd(day, -1, getdate())
-     ORDER BY total_exec_time DESC
-     LIMIT 50;
+### 6.3 Day 1 Midday – Metadata Lake on S3
+1. **Plan Metadata Formats**
+   - `metadata/schema/schema.json` structure:
+     ```json
+     {
+       "extract_timestamp": "2024-05-21T02:00:00Z",
+       "tables": [
+         {
+           "table_name": "public.sales",
+           "row_count": 12543098,
+           "dist_style": "KEY",
+           "dist_key": "customer_id",
+           "sort_keys": ["sale_date"],
+           "columns": [
+             {"name": "sale_id", "type": "BIGINT", "encoding": "RAW", "nullable": false},
+             {"name": "customer_id", "type": "INTEGER", "encoding": "ZSTD", "nullable": false}
+           ]
+         }
+       ]
+     }
      ```
-   - Package dependencies (`boto3`, `psycopg2` if direct connection) via Lambda layer.
-2. **Orchestrator Lambda**
-   - Reads from S3 event or Query Collector output.
-   - For each query, dispatches to sub-agent prompts using Bedrock.
-   - Stores aggregated JSON in DynamoDB and optionally posts to FastAPI endpoint.
-   - Include exponential backoff for Bedrock retries.
-   - Core logic (pseudo-code):
+   - `metadata/data_profile/profile.json` summarizing min/max, null ratio, top values for critical columns.
+   - `metadata/query_history/yyyymmdd/query_samples.json` containing representative queries for agents.
+2. **Deploy Metadata Extractor Lambda**
+   - Runtime: Python 3.11.
+   - Dependencies: `boto3`, `psycopg2-binary` (if using direct connection), `tenacity` for retries.
+   - Logic steps:
+     1. Connect to Redshift via Data API or JDBC.
+     2. Query `SVV_TABLE_INFO`, `SVV_COLUMN_INFO`, `SVL_QLOG`, `STL_QUERY` to capture schema and usage statistics.
+     3. Build JSON payloads and write to S3 (`metadata/schema/schema.json`, `metadata/data_profile/profile-YYYYMMDD.json`).
+     4. Generate CSV of recent query statistics into `metadata/query_history/`.
+     5. Publish summary to CloudWatch logs.
+   - Environment variables: `S3_METADATA_BUCKET`, `REDSHIFT_SECRET_ARN`, `AWS_REGION`.
+3. **Optional AWS Glue Crawler**
+   - Configure crawler to catalog `metadata/` folder for Athena querying.
+   - Schedule crawler post-Lambda run to maintain Data Catalog.
+4. **Automate Metadata Refresh**
+   - Attach `MetadataRefreshSchedule` EventBridge rule to trigger the Lambda daily.
+   - Add `maxEventAgeInSeconds` = 3600 and `retryAttempts` = 2 for robustness.
+5. **Manual Validation**
+   - Run Lambda test invocation from console.
+   - Verify JSON/CSV objects appear with correct structure and timestamps.
+   - Store sample outputs locally for reference.
+
+### 6.4 Day 1 Afternoon – Telemetry & Agent Orchestration
+1. **Query Collector Lambda**
+   - Runtime: Python 3.11.
+   - Responsibilities: pull slow queries from Redshift, write raw telemetry to S3, optionally send payload to orchestrator via EventBridge pipe.
+   - Pseudocode:
      ```python
      def handler(event, context):
-         queries = load_queries(event)
-         for query_record in queries:
-             recommendations = []
-             for agent_type in ["optimize", "schema_review", "cost_review", "validate"]:
-                 response_text = invoke_claude(AGENT_SYSTEM_PROMPTS[agent_type], build_user_prompt(query_record))
-                 recommendations.append(json.loads(response_text))
-             payload = assemble_payload(query_record, recommendations)
-             save_to_dynamodb(payload)
-             post_to_fastapi(payload)
+         queries = fetch_slow_queries(limit=50)  # SELECT from STL_QUERY
+         write_to_s3("metadata/query_history/" + today + "/slow_queries.json", queries)
+         invoke_orchestrator(queries)
      ```
-3. **EventBridge Rules**
-   - Schedule orchestrator every hour or trigger on `s3:ObjectCreated` events.
-4. **DynamoDB Table** (e.g., `query-optimization-history`)
-   - Partition key: `query_hash` (string)
-   - Sort key: `analysis_timestamp`
-   - Attributes: `workload_metadata`, `recommendations`, `agent_responses`.
+   - Use Secrets Manager to retrieve Redshift credentials automatically.
+   - Deploy via SAM/Terraform with environment variables (`S3_METADATA_BUCKET`, `ORCHESTRATOR_ARN`).
+2. **Agent Orchestrator Lambda**
+   - Purpose: For each incoming query context, orchestrate four Bedrock agents and aggregate responses.
+   - Steps per execution:
+     1. Load latest schema metadata from S3 (`schema.json`, `profile-<date>.json`).
+     2. Build agent-specific prompts with context: query text, schema details, usage statistics.
+     3. Invoke Bedrock sequentially (or with concurrency) for agents:
+        - `redshift-query-optimizer`
+        - `schema-normalizer`
+        - `cost-saver`
+        - `data-validation-agent`
+     4. Parse JSON responses, attach metadata such as `agent_name`, `confidence`, `action_items`.
+     5. Persist combined payload to DynamoDB and append JSON to S3 `recommendations/YYYY/MM/DD/<query_hash>.json`.
+     6. POST summarized result to FastAPI webhook with bearer token from Secrets Manager.
+     7. Publish notification to SNS when critical issues detected.
+   - Include exponential backoff (e.g., `tenacity`) for Bedrock throttling.
+   - Example Bedrock invocation snippet:
+     ```python
+     response = bedrock.invoke_model(
+         modelId=os.environ["BEDROCK_MODEL_ID"],
+         contentType="application/json",
+         accept="application/json",
+         body=json.dumps({
+             "anthropic_version": "bedrock-2023-05-31",  # per SDK docs
+             "max_tokens": 2000,
+             "temperature": 0.4,
+             "messages": [
+                 {"role": "system", "content": agent_system_prompt},
+                 {"role": "user", "content": user_prompt}
+             ]
+         })
+     )
+     ```
+3. **Agent Context Builder**
+   - Store system prompts in S3 `bedrock-context/prompts/<agent>.txt`.
+   - Lambda loads prompts at runtime to avoid redeployment for updates.
+   - Include `schema.json` and `profile.json` excerpts in prompts but chunk to avoid token limits.
+4. **SNS / Slack Notifications**
+   - Create SNS topic `redshift-optimization-alerts`.
+   - Subscribe email and HTTPS Slack webhook.
+   - Lambda publishes when recommendations include severity `HIGH` or `validation_failures > 0`.
+5. **Permissions Check**
+   - Ensure orchestrator role can read S3 metadata, write to `recommendations/`, access DynamoDB, invoke Bedrock, post to FastAPI (via VPC endpoint or internet).
+6. **Deployment**
+   - Package Lambdas with dependencies using AWS SAM build, Lambda layers, or container images.
+   - Deploy infrastructure stack.
+   - Record ARNs and environment variable values.
 
-### 5.5 Day 1 Afternoon – FastAPI Integration
-1. **Environment Variables**
-   - Add to `.env`: `AWS_REGION`, `BEDROCK_MODEL_ID`, `REDISHT_WEBHOOK_TOKEN` (shared secret).
-2. **New Route**
-   - Create `@app.post("/ingest/bedrock")` endpoint expecting JSON payload from orchestrator.
-   - Validate bearer token header.
-   - Insert payload into `HistoryStore` (existing JSONL or DynamoDB integration).
-3. **Frontend Update**
-   - Expose new metrics (e.g., `redshift_recommendations_count`) on `/metrics` route.
-4. **Testing**
-   - Use Postman or `curl` to POST sample payload to `/ingest/bedrock`.
-   - Confirm `/history` and UI reflect new entries.
+### 6.5 Day 1 Late – FastAPI Cloud Integration
+1. **Environment Variables** (`.env` or AWS Parameter Store)
+   - `AWS_REGION`
+   - `BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0`
+   - `DYNAMODB_TABLE=query-optimization-history`
+   - `S3_METADATA_BUCKET=redshift-telemetry-bucket`
+   - `REDISHT_WEBHOOK_TOKEN` (stored securely; note typo—should be `REDSHIFT_WEBHOOK_TOKEN` when implemented)
+2. **New Endpoints**
+   - `POST /ingest/bedrock`
+     - Validate bearer token header (`Authorization: Bearer <token>`).
+     - Schema: `{ "query_hash": str, "query_text": str, "agents": [ ... ], "recommendations": {...} }`.
+     - Persist payload to DynamoDB or local store for UI.
+   - `POST /optimize/redshift`
+     - Accepts raw SQL string from user.
+     - Calls orchestrator API (via API Gateway) or publishes message to SQS to trigger orchestrator.
+     - Returns job status ID for polling.
+3. **Metadata Viewer**
+   - `GET /metadata/schema` returning latest `schema.json` from S3 (cached locally).
+   - `GET /metadata/data-profile` returning daily stats.
+4. **Frontend / UI Updates**
+   - Display sections for each agent:
+     - Optimization recommendations.
+     - Schema change alerts.
+     - Cost savings.
+     - Data validation results.
+   - Provide download link to original metadata JSON for transparency.
+5. **History & Analytics**
+   - Enhance `/history` route to query DynamoDB for past `query_hash` entries.
+   - Add filters (date range, agent severity, cost impact).
+6. **Testing Locally**
+   - Use `moto` or local mocks to simulate S3/DynamoDB for unit tests.
+   - Create integration tests hitting real AWS endpoints (in dev account) guarded by feature flag.
+7. **Deployment Strategy**
+   - Containerize FastAPI (Docker) and deploy to ECS Fargate or App Runner.
+   - Alternatively, package as Lambda via AWS Lambda Powertools + API Gateway for serverless approach.
 
-## 6. Detailed Configuration Steps
-### 6.1 Secrets Management
-1. Store Redshift credentials in **AWS Secrets Manager** (`/redshift/cluster-admin`).
-2. Reference secrets in Lambda using environment variable `REDISHT_SECRET_ARN`.
-3. Ensure Lambda role has `secretsmanager:GetSecretValue` permission.
+## 7. Agent Configuration Playbook
+### 7.1 `redshift-query-optimizer`
+- **Purpose**: Rewrite and optimize slow/inefficient SQL queries.
+- **Prompt Handling**:
+  1. Load query text, table schemas, distribution/sort keys from `schema.json`.
+  2. Provide execution stats (execution time, scans) from `slow_queries.json`.
+  3. Ask for recommendations on JOIN order, predicate pushdown, materialized views, sort/dist keys.
+- **Output Format** (JSON):
+  ```json
+  {
+    "optimized_query": "SELECT ...",
+    "analysis": ["Replace CROSS JOIN with INNER JOIN..."],
+    "estimated_benefit": "~40% scan reduction",
+    "additional_actions": ["Consider DISTKEY on customer_id"]
+  }
+  ```
+- **Tools**: `read`, `edit`, `explain-plan`, `schema-introspect` (conceptual placeholders provided to Claude prompt for reasoning).
 
-### 6.2 VPC Endpoints (Optional, recommended for private setup)
-1. Create VPC endpoints for:
-   - Redshift Data API (`com.amazonaws.us-east-1.redshift-data`)
-   - Bedrock runtime (`com.amazonaws.us-east-1.bedrock-runtime`)
-   - S3 gateway endpoint
-2. Update route tables for private subnets.
+### 7.2 `schema-normalizer`
+- **Purpose**: Review Redshift table designs for normalization/denormalization, distribution, encoding.
+- **Prompt Inputs**: `schema.json`, `profile.json`, join frequency from `query_history`.
+- **Guidelines**:
+  - Flag over-normalized tables causing large joins.
+  - Recommend distribution style/key and sort key adjustments.
+  - Suggest column encoding (e.g., `ENCODE ZSTD`).
+- **Output**: actionable steps with priority tags.
 
-### 6.3 CloudWatch Monitoring
-1. Create **Metrics** namespace `RedshiftOptimizer`.
-2. Publish custom metrics from Lambda (e.g., `QueriesAnalyzed`, `BedrockLatencyMs`).
-3. Set alarms for high error count or Bedrock throttling.
+### 7.3 `cost-saver`
+- **Purpose**: Reduce Redshift compute/storage costs.
+- **Prompt Inputs**: Query frequencies, table sizes, WLM queue stats.
+- **Recommendations**:
+  - Use materialized views, result set caching.
+  - Drop unused tables/columns.
+  - Adjust `automatic_workload_management` or concurrency scaling.
+  - Offload cold data to S3 (UNLOAD + Spectrum).
 
-### 6.4 Notifications
-1. Create SNS topic `redshift-optimization-alerts`.
-2. Subscribe email and Slack webhook via HTTPS.
-3. Modify orchestrator to publish notifications when recommendations include high-priority warnings (e.g., missing WHERE clause causing scans).
+### 7.4 `data-validation-agent`
+- **Purpose**: Ensure data integrity between Redshift and sources (S3 manifests, RDS snapshots).
+- **Prompt Inputs**:
+  - S3 metadata (row counts from ETL, checksum files).
+  - Redshift table summaries (row counts, min/max).
+- **Tasks**:
+  - Compare counts, highlight drift.
+  - Flag null anomalies or duplicate primary keys.
+  - Suggest remediation steps (re-run ETL, fix mapping).
 
-## 7. Operating Procedures
-1. **Daily Checks**
-   - Review CloudWatch dashboards for Lambda health.
-   - Check DynamoDB entry counts and ensure new entries match Redshift query volume.
-2. **Weekly Maintenance**
-   - Rotate Redshift credentials via Secrets Manager rotation policy.
-   - Review Bedrock usage in AWS Cost Explorer.
-3. **Incident Response**
-   - Error triggered via SNS when orchestrator fails.
-   - Use CloudWatch logs to inspect stack traces and responses.
-4. **Scaling**
-   - Increase Lambda memory for faster Bedrock inference.
-   - Use provisioned concurrency if high, predictable demand.
+### 7.5 Prompt Management & Versioning
+- Store prompts in S3 with semantic versioning (`bedrock-context/prompts/v1/<agent>.txt`).
+- Add metadata file `bedrock-context/prompts/manifest.json` capturing versions and change logs.
+- Expose CLI script to update prompts and invalidate Lambda cache (e.g., via Parameter Store).
 
-## 8. Security Considerations
-- Enforce IAM least privilege throughout.
-- Enable Redshift database auditing.
-- Encrypt S3 buckets, DynamoDB tables, and logs with AWS-managed or customer-managed KMS keys.
-- Scrub queries before sending to Bedrock to remove PII.
-- Use HTTPS and signed payloads between Lambda and FastAPI.
+## 8. Metadata Refresh Automation
+1. **Daily EventBridge Rule**
+   - Cron expression: `0 2 * * ? *` (02:00 UTC).
+   - Targets: Metadata Extractor Lambda, followed by optional Glue crawler.
+2. **Lambda Processing Steps**
+   1. Pull table list with `SELECT * FROM SVV_TABLE_INFO`.
+   2. Fetch column stats `SELECT * FROM SVV_COLUMN_INFO`.
+   3. Compute data profile metrics (min/max/avg/null_count) using Redshift SQL.
+   4. Save current metadata under `metadata/schema/schema.json` (overwrite) and timestamped copy `metadata/schema/schema-YYYYMMDD.json`.
+   5. Save data profile to `metadata/data_profile/profile-YYYYMMDD.json`.
+   6. Extract previous day query logs (`STL_QUERY`, `SVL_QLOG`) filtered by runtime > threshold; write to `metadata/query_history/YYYY/MM/DD/slow_queries.json`.
+   7. Publish SNS notification summarizing changes (# of tables altered, columns added/removed).
+3. **Change Detection**
+   - Lambda compares new schema snapshot to previous version.
+   - If change detected, write diff to `metadata/schema/diff-YYYYMMDD.json` (list additions/removals) to help agents.
+4. **Glue/Athena Integration**
+   - Glue crawler updates data catalog for `metadata/` prefix.
+   - Analysts can query metadata via Athena for manual validation.
+5. **Logging & Alerts**
+   - Push metrics `MetadataTablesProcessed`, `SchemaChangesDetected` to CloudWatch.
+   - Create alarm if extractor fails or if `SchemaChangesDetected > 0` to notify DBA for review.
 
-## 9. Cost Estimate (Ballpark)
+## 9. Security Considerations
+- **Least Privilege IAM**: restrict Lambda roles to specific bucket prefixes and DynamoDB tables.
+- **Secret Rotation**: enable Secrets Manager rotation for Redshift credentials (30-day cycle).
+- **Encryption**: use SSE-S3, DynamoDB KMS encryption, and optionally customer-managed CMKs.
+- **Network Isolation**: leverage VPC endpoints for Bedrock runtime, S3, DynamoDB, and Secrets Manager.
+- **Data Sanitization**: mask or redact PII before sending queries to Bedrock; use placeholder values in prompts.
+- **API Security**: enforce HTTPS, signed payloads, and JWT/bearer token checks between Lambda and FastAPI.
+
+## 10. Operations & Monitoring
+1. **CloudWatch Dashboards**
+   - Metrics: Lambda duration/error, Bedrock latency, DynamoDB throttles, schema change counts.
+2. **Alarms**
+   - `LambdaFailureAlarm` for orchestrator.
+   - `BedrockThrottleAlarm` when invocation errors exceed threshold.
+   - `MetadataRefreshMissed` when no run in 24h.
+3. **Logging**
+   - Structure logs with correlation IDs (`query_hash`).
+   - Ship logs to S3 via Firehose if long-term retention required.
+4. **Runbooks**
+   - Document procedures for rerunning metadata extraction, reprocessing failed queries, rotating prompts.
+
+## 11. Cost Estimate (Ballpark)
 | Component | Estimated Cost |
-| --------- | -------------- |
-| Redshift (single RA3 node) | ~$1.20/hour |
-| Lambda (100K requests, 512MB, 1s) | <$5/month |
-| Bedrock Claude 3 Sonnet usage | Pay-per-token (~$0.003/1K tokens) |
-| DynamoDB (on-demand) | <$5/month |
-| S3 storage + requests | negligible for small logs |
+| --- | --- |
+| Redshift (single RA3) | ~$1.20/hour |
+| Lambda (metadata + orchestrator + collector) | <$10/month |
+| Bedrock Claude 3 Sonnet | ~$0.003 / 1K tokens (estimate $40–$80/month depending on volume) |
+| DynamoDB (on-demand) | <$10/month |
+| S3 storage & requests | <$5/month |
+| EventBridge, SNS | Negligible |
+| Glue crawler (optional) | <$5/run when daily |
 
-## 10. Testing Checklist
+## 12. Testing & Validation Checklist
 1. **Infrastructure Validation**
-   - Redshift cluster reachable from Lambda (test with simple `SELECT 1`).
-   - S3 bucket accessible (upload test file).
-2. **Lambda Dry Run**
-   - Manually trigger orchestrator with sample event.
-   - Confirm Bedrock response stored in DynamoDB.
-3. **End-to-End**
-   - Execute a slow query on Redshift.
-   - Confirm log captured, orchestrator executed, FastAPI history updated, and email/Slack alert received.
-4. **Failure Modes**
-   - Simulate Bedrock timeout and verify retry/backoff.
-   - Turn off Redshift cluster to ensure graceful error handling.
+   - `SELECT 1` via Redshift query editor from Lambda.
+   - Confirm S3 buckets exist with correct prefixes and encryption.
+   - Validate IAM role permissions using AWS IAM Access Analyzer.
+2. **Metadata Extractor Tests**
+   - Invoke Lambda manually; inspect generated JSONs for accuracy.
+   - Compare schema JSON vs. actual Redshift schema (spot check table).
+3. **Agent Orchestrator Dry Run**
+   - Upload sample `slow_queries.json` to S3; trigger orchestrator with test event.
+   - Verify DynamoDB entry created and S3 recommendation file stored.
+4. **FastAPI Integration**
+   - Use `curl`/Postman to simulate orchestrator POST to `/ingest/bedrock`.
+   - Submit sample query via `/optimize/redshift`; ensure orchestrator invoked.
+5. **End-to-End Scenario**
+   - Execute intentionally slow query in Redshift.
+   - Confirm query captured → metadata updated → agents produce recommendations → FastAPI displays results → notification fired.
+6. **Failure Modes**
+   - Disable Bedrock access to test retry/backoff.
+   - Modify schema to trigger metadata change alert.
+   - Drop network connectivity to verify Lambda error handling.
+7. **Performance Validation**
+   - Measure end-to-end processing time.
+   - Tune Lambda memory/timeout for optimum cost/performance.
 
-## 11. Deliverables by End of Next Working Day
-1. **Infrastructure as Code Templates** (SAM/Terraform) committed to repo.
-2. **Lambda Source Code** and deployment scripts.
-3. **FastAPI Modifications** merged into branch with tests.
-4. **Operational Runbook** (this playbook + CloudWatch dashboard snapshots).
-5. **Demo Recording/Notes** showing end-to-end flow with sample data.
+## 13. Deliverables by End of Day 1
+1. **IaC Templates** provisioning VPC, Redshift, S3, DynamoDB, Lambdas, EventBridge, SNS.
+2. **Lambda Source Code** with deployment scripts (SAM/Makefile).
+3. **FastAPI Enhancements** merged into feature branch with unit/integration tests.
+4. **Metadata Schema Documentation** describing S3 folder layout and JSON structure.
+5. **Runbook & Diagrams** (this playbook plus architecture diagrams exported to PDF/PNG).
+6. **Demo Recording** or screenshots proving end-to-end flow.
 
-## 12. Future Enhancements
-- Add support for **Explain Plan analysis** via Redshift `EXPLAIN` command.
-- Use **Step Functions** to orchestrate multi-step agent workflows with branching logic.
-- Integrate **Athena or QuickSight** dashboards for visualizing recommendations over time.
-- Deploy FastAPI backend to AWS (ECS Fargate or Lambda via API Gateway) for full cloud-native setup.
-- Expand to additional Bedrock models (Titan Text, JurassiQ) for complementary inference tasks.
+## 14. Future Enhancements
+- Use **AWS Step Functions** for more complex agent orchestration with parallel states.
+- Integrate **Amazon QuickSight** dashboards visualizing recommendation trends.
+- Implement **auto-scaling** policies for FastAPI service based on queue depth.
+- Add **Explain Plan ingestion** (Redshift `EXPLAIN`) to supply richer context to agents.
+- Expand to **additional Bedrock models** (Amazon Titan) for alternative reasoning styles.
+- Introduce **CI/CD** pipeline (CodePipeline) for automated testing and deployment.
 
-## 13. Reference Materials
+## 15. Reference Materials
 - [Amazon Redshift Documentation](https://docs.aws.amazon.com/redshift/latest/dg/welcome.html)
-- [Amazon Bedrock Getting Started](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)
-- [AWS Lambda Developer Guide](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html)
+- [Amazon Bedrock Developer Guide](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)
+- [AWS Lambda Best Practices](https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html)
+- [AWS EventBridge Scheduler](https://docs.aws.amazon.com/eventbridge/latest/userguide/)
 - [FastAPI Deployment on AWS](https://fastapi.tiangolo.com/deployment/)
+- [AWS Glue Crawlers](https://docs.aws.amazon.com/glue/latest/dg/add-crawler.html)
 
 ---
-**Next Action**: Begin executing Day 0 tasks immediately, verify resource creation in AWS console, and use this playbook as the master checklist for migration. Document progress in project tracker and schedule stakeholder walkthrough once the end-to-end test succeeds.
+**Next Action**: Start with Day 0 preparation immediately, then follow the Day 1 sequence to deploy infrastructure, metadata automation, Bedrock agents, and FastAPI integrations. Keep this checklist updated with actual resource names, and log progress in the project tracker for stakeholder visibility.
