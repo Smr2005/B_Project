@@ -61,7 +61,12 @@ flowchart LR
         MetadataExtractor["Metadata Extractor Lambda"]
         QueryCollector["Query Collector Lambda"]
         AgentOrchestrator["Agent Orchestrator Lambda"]
-        Bedrock["Amazon Bedrock (Claude 3 Agents)"]
+        subgraph Bedrock["Amazon Bedrock"]
+            AgentOptimizer["redshift-query-optimizer"]
+            AgentSchema["schema-normalizer"]
+            AgentCost["cost-saver"]
+            AgentValidation["data-validation-agent"]
+        end
         SNS["Amazon SNS / Slack Webhook"]
         FastAPI["FastAPI Service (EC2 / ECS / Lambda)"]
     end
@@ -74,8 +79,14 @@ flowchart LR
     EventBridge --> QueryCollector
     QueryCollector -->|"Slow query batches"| S3Metadata
     S3Metadata --> AgentOrchestrator
-    AgentOrchestrator --> Bedrock
-    Bedrock --> AgentOrchestrator
+    AgentOrchestrator --> AgentOptimizer
+    AgentOrchestrator --> AgentSchema
+    AgentOrchestrator --> AgentCost
+    AgentOrchestrator --> AgentValidation
+    AgentOptimizer --> AgentOrchestrator
+    AgentSchema --> AgentOrchestrator
+    AgentCost --> AgentOrchestrator
+    AgentValidation --> AgentOrchestrator
     AgentOrchestrator --> DynamoDB
     AgentOrchestrator --> FastAPI
     AgentOrchestrator --> SNS
@@ -340,6 +351,82 @@ flowchart LR
 - Store prompts in S3 with semantic versioning (`bedrock-context/prompts/v1/<agent>.txt`).
 - Add metadata file `bedrock-context/prompts/manifest.json` capturing versions and change logs.
 - Expose CLI script to update prompts and invalidate Lambda cache (e.g., via Parameter Store).
+
+### 7.6 Step-by-Step Agent Creation Instructions
+1. **Create Prompt Files**
+   - For each agent, craft the system prompt using the guidance below and save it locally as `<agent>.prompt.md`.
+   - Include JSON response schemas to enforce structured outputs.
+2. **Upload Prompts to S3**
+   - Run `aws s3 cp ./prompts/<agent>.prompt.md s3://redshift-telemetry-bucket/bedrock-context/prompts/v1/<agent>.txt`.
+   - Update `manifest.json` with version, author, and date.
+3. **Register Prompts in Parameter Store**
+   - Create String parameters (e.g., `/prod/bedrock/prompts/redshift-query-optimizer`) containing the S3 URI.
+   - Grant the orchestrator Lambda `ssm:GetParameter` permission.
+4. **Update Lambda Configuration**
+   - Add environment variables `PROMPT_MANIFEST_PARAMETER` and `PROMPT_VERSION`.
+   - Ensure Lambda fetches prompt URIs on cold start and caches contents in memory.
+5. **Test Bedrock Invocation**
+   - Use `boto3` script locally or Lambda test event to submit a dummy query and verify JSON output matches schema.
+
+#### 7.6.1 `redshift-query-optimizer`
+1. Write the system prompt verbatim from the requirement (include role as Redshift SQL performance expert).
+2. Append explicit instructions for output structure:
+   ```json
+   {
+     "optimized_query": "<string>",
+     "analysis": ["<string>", "<string>"] ,
+     "estimated_benefit": "<string>",
+     "additional_actions": ["<string>"]
+   }
+   ```
+3. Save as `prompts/redshift-query-optimizer.prompt.md` and upload to S3.
+4. In orchestrator Lambda, map agent key `"redshift-query-optimizer"` to the prompt URI and to the Bedrock model `anthropic.claude-3-sonnet-20240229-v1:0`.
+5. Run a sample optimization against a known slow query and verify the response is valid JSON.
+
+#### 7.6.2 `schema-normalizer`
+1. Compose instructions emphasizing denormalization guidance, distribution/sort key advice, and encoding suggestions.
+2. Define output schema:
+   ```json
+   {
+     "schema_findings": ["<string>"],
+     "distribution_recommendations": ["<string>"],
+     "sort_key_recommendations": ["<string>"],
+     "encoding_recommendations": ["<string>"]
+   }
+   ```
+3. Save as `prompts/schema-normalizer.prompt.md`, upload to S3, update manifest.
+4. Ensure orchestrator loads latest schema metadata chunks and includes them in the user message.
+5. Trigger Lambda test referencing an updated table to make sure suggestions mention distribution/sort keys.
+
+#### 7.6.3 `cost-saver`
+1. Draft prompt covering cost analysis, WLM advice, materialized views, and cold data archiving.
+2. Use response template:
+   ```json
+   {
+     "high_cost_queries": ["<string>"],
+     "cost_reduction_actions": ["<string>"],
+     "wlm_recommendations": ["<string>"],
+     "storage_optimizations": ["<string>"]
+   }
+   ```
+3. Store as `prompts/cost-saver.prompt.md`, upload, and record version.
+4. Supply query history stats (from `metadata/query_history/`) and table size metrics when invoking the agent.
+5. Validate output identifies at least one materialized view or caching opportunity using sample telemetry.
+
+#### 7.6.4 `data-validation-agent`
+1. Build prompt stressing row-count comparisons, aggregate checks, and anomaly detection between Redshift and source data.
+2. Output schema:
+   ```json
+   {
+     "validation_checks": ["<string>"],
+     "issues_detected": ["<string>"],
+     "recommended_fixes": ["<string>"],
+     "confidence_score": "<string>"
+   }
+   ```
+3. Save as `prompts/data-validation-agent.prompt.md`, upload, update manifest.
+4. Provide context objects: S3 ETL manifests, Redshift aggregates, source row counts.
+5. Test with intentional discrepancies to ensure the agent flags mismatches and suggests remediation.
 
 ## 8. Metadata Refresh Automation
 1. **Daily EventBridge Rule**
