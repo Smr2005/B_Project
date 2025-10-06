@@ -41,12 +41,12 @@ flowchart LR
             RS[Amazon Redshift Cluster]
             Lambdas[Lambda Subnet]
         end
-        S3[(S3 Buckets)]
-        DynamoDB[(DynamoDB Table)]
-        EventBridge[EventBridge Scheduler]
-        Bedrock[Amazon Bedrock (Claude 3)]
-        SNS[(SNS or Slack Webhook)]
-        FastAPI[FastAPI Service on EC2 / ECS / Lambda]
+        S3[(Amazon S3 Buckets)]
+        DynamoDB[(Amazon DynamoDB Table)]
+        EventBridge[Amazon EventBridge Scheduler]
+        Bedrock["Amazon Bedrock Claude 3"]
+        SNS["Amazon SNS or Slack Webhook"]
+        FastAPI["FastAPI Service (EC2 / ECS / Lambda)"]
     end
 
     VSCode -->|Code Deploy| AWS
